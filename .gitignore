@@ -1,0 +1,9 @@
+*.pem
+ca-db-*
+*.csr
+src/*.swp
+src/certs/
+src/dtls_udp_chargen
+src/dtls_udp_discard
+src/dtls_udp_echo
+

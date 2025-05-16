@@ -1,7 +1,8 @@
 
+
 CFLAGS      = -std=c99 -pedantic -Wall -g -Wextra -Wno-unused-parameter -Wno-unused-function -Wno-overlength-strings
-INCLUDES    = -I/usr/local/include
-LFLAGS      = -L/usr/local/lib
+INCLUDES    = -I$(HOME)/local/include -I/usr/include
+LFLAGS      = -L$(HOME)/local/lib64 -L/usr/lib64
 LIBS        = -lssl -lcrypto -pthread -lm -ldl
 
 #CFLAGS     += -fsanitize=address -fno-omit-frame-pointer -g
