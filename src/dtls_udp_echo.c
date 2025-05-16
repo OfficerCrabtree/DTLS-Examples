@@ -356,6 +356,7 @@ struct pass_info {
 		struct sockaddr_in s4;
 	} server_addr, client_addr;
 	SSL *ssl;
+  int fd;
 };
 
 int dtls_verify_callback (int ok, X509_STORE_CTX *ctx) {
@@ -376,61 +377,13 @@ void* connection_handle(void *info) {
 	char addrbuf[INET6_ADDRSTRLEN];
 	struct pass_info *pinfo = (struct pass_info*) info;
 	SSL *ssl = pinfo->ssl;
-	int fd, reading = 0, ret;
-	const int on = 1, off = 0;
+	int reading = 0, ret;
 	struct timeval timeout;
 	int num_timeouts = 0, max_timeouts = 5;
 
 #ifndef WIN32
 	pthread_detach(pthread_self());
 #endif
-
-	OPENSSL_assert(pinfo->client_addr.ss.ss_family == pinfo->server_addr.ss.ss_family);
-	fd = socket(pinfo->client_addr.ss.ss_family, SOCK_DGRAM, 0);
-	if (fd < 0) {
-		perror("socket");
-		goto cleanup;
-	}
-
-#ifdef WIN32
-	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char*) &on, (socklen_t) sizeof(on));
-#else
-	setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const void*) &on, (socklen_t) sizeof(on));
-#if defined(SO_REUSEPORT) && !defined(__linux__)
-	setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, (const void*) &on, (socklen_t) sizeof(on));
-#endif
-#endif
-	switch (pinfo->client_addr.ss.ss_family) {
-		case AF_INET:
-			if (bind(fd, (const struct sockaddr *) &pinfo->server_addr, sizeof(struct sockaddr_in))) {
-				perror("bind");
-				goto cleanup;
-			}
-			if (connect(fd, (struct sockaddr *) &pinfo->client_addr, sizeof(struct sockaddr_in))) {
-				perror("connect");
-				goto cleanup;
-			}
-			break;
-		case AF_INET6:
-			setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&off, sizeof(off));
-			if (bind(fd, (const struct sockaddr *) &pinfo->server_addr, sizeof(struct sockaddr_in6))) {
-				perror("bind");
-				goto cleanup;
-			}
-			if (connect(fd, (struct sockaddr *) &pinfo->client_addr, sizeof(struct sockaddr_in6))) {
-				perror("connect");
-				goto cleanup;
-			}
-			break;
-		default:
-			OPENSSL_assert(0);
-			break;
-	}
-
-	/* Set new fd and set BIO to connected */
-	BIO_set_fd(SSL_get_rbio(ssl), fd, BIO_NOCLOSE);
-	BIO_ctrl(SSL_get_rbio(ssl), BIO_CTRL_DGRAM_SET_CONNECTED, 0, &pinfo->client_addr.ss);
-
 	/* Finish handshake */
 	do { ret = SSL_accept(ssl); }
 	while (ret == 0);
@@ -547,9 +500,9 @@ void* connection_handle(void *info) {
 
 cleanup:
 #ifdef WIN32
-	closesocket(fd);
+	closesocket(pinfo->fd);
 #else
-	close(fd);
+	close(pinfo->fd);
 #endif
 	free(info);
 	SSL_free(ssl);
@@ -689,6 +642,55 @@ void start_server(int port, char *local_address) {
 		memcpy(&info->client_addr, &client_addr, sizeof(struct sockaddr_storage));
 		info->ssl = ssl;
 
+    /*
+     * "connect" the socket as soon as DTLSv1_listen completes.
+     */
+	  OPENSSL_assert(info->client_addr.ss.ss_family == info->server_addr.ss.ss_family);
+	  info->fd = socket(info->client_addr.ss.ss_family, SOCK_DGRAM, 0);
+	  if (info->fd < 0) {
+		  perror("socket");
+		  break;
+	  }
+
+#ifdef WIN32
+	  setsockopt(info->fd, SOL_SOCKET, SO_REUSEADDR, (const char*) &on, (socklen_t) sizeof(on));
+#else
+	  setsockopt(info->fd, SOL_SOCKET, SO_REUSEADDR, (const void*) &on, (socklen_t) sizeof(on));
+#if defined(SO_REUSEPORT) && !defined(__linux__)
+	  setsockopt(info->fd, SOL_SOCKET, SO_REUSEPORT, (const void*) &on, (socklen_t) sizeof(on));
+#endif
+#endif
+  	switch (info->client_addr.ss.ss_family) {
+  		case AF_INET:
+  			if (bind(info->fd, (const struct sockaddr *) &info->server_addr, sizeof(struct sockaddr_in))) {
+  				perror("bind");
+  				goto cleanup;
+  			}
+  			if (connect(info->fd, (struct sockaddr *) &info->client_addr, sizeof(struct sockaddr_in))) {
+  				perror("connect");
+  				goto cleanup;
+  			}
+  			break;
+  		case AF_INET6:
+  			setsockopt(info->fd, IPPROTO_IPV6, IPV6_V6ONLY, (char *)&off, sizeof(off));
+  			if (bind(info->fd, (const struct sockaddr *) &info->server_addr, sizeof(struct sockaddr_in6))) {
+  				perror("bind");
+  				goto cleanup;
+  			}
+  			if (connect(info->fd, (struct sockaddr *) &info->client_addr, sizeof(struct sockaddr_in6))) {
+  				perror("connect");
+  				goto cleanup;
+  			}
+  			break;
+  		default:
+  			OPENSSL_assert(0);
+  			break;
+  	}
+  
+  	/* Set new fd and set BIO to connected */
+  	BIO_set_fd(SSL_get_rbio(ssl), info->fd, BIO_NOCLOSE);
+  	BIO_ctrl(SSL_get_rbio(ssl), BIO_CTRL_DGRAM_SET_CONNECTED, 0, &info->client_addr.ss);
+
 #ifdef WIN32
 		if (CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE) connection_handle, info, 0, &tid) == NULL) {
 			exit(-1);
@@ -700,6 +702,8 @@ void start_server(int port, char *local_address) {
 		}
 #endif
 	}
+
+cleanup:
 
 	THREAD_cleanup();
 #ifdef WIN32
